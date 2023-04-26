@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"fmt"
+	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -80,3 +81,71 @@ var _ = Describe("Validates OCP version", func() {
 		})
 	})
 })
+
+func TestParseDiskSizeToGigibyte(t *testing.T) {
+	type args struct {
+		size string
+	}
+	tests := []struct {
+		name    string
+		args    args
+		want    int
+		wantErr bool
+	}{
+		{"invalid unit: 1foo", args{"1foo"}, 0, true},
+		{"valid unit: 0", args{"0"}, 0, false},
+		{"invalid unit no suffix: 1 but return 0", args{"0"}, 0, false},
+		{"invalid unit: 1K", args{"1K"}, 0, true},
+		{"invalid unit: 1KiB", args{"1KiB"}, 0, true},
+		{"invalid unit: 1 MiB", args{"1 MiB"}, 0, true},
+		{"invalid unit: 1 mib", args{"1 mib"}, 0, true},
+		{"invalid unit: 0 GiB", args{"0 GiB"}, 0, false},
+		{"valid unit: 100 G", args{"100 G"}, 93, false},
+		{"valid unit: 100GB", args{"100GB"}, 93, false},
+		{"valid unit: 100Gb", args{"100Gb"}, 93, false},
+		{"valid unit: 100g", args{"100g"}, 93, false},
+		{"valid unit: 100GiB", args{"100GiB"}, 100, false},
+		{"valid unit: 100gib", args{"100gib"}, 100, false},
+		{"valid unit: 100 gib", args{"100 gib"}, 100, false},
+		{"valid unit: 100 TB", args{"100 TB"}, 93132, false},
+		{"valid unit with spaces: 100 T ", args{"100 T "}, 93132, false},
+		{"valid unit: 1000 Ti", args{"1000 Ti"}, 1024000, false},
+		{"valid unit: empty string", args{""}, 0, false},
+		{"valid unit: -1", args{"-1"}, 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseDiskSizeToGigibyte(tt.args.size)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("parseDiskSizeToGigibyte() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if got != tt.want {
+				t.Errorf("parseDiskSizeToGigibyte() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func Test_machinePoolRooDiskSizeValidator(t *testing.T) {
+	type args struct {
+		val interface{}
+	}
+	tests := []struct {
+		name    string
+		args    args
+		wantErr bool
+	}{
+		{"valid size: 128", args{"128 GiB"}, false},
+		{"invalid size: 99", args{"99 GiB"}, true},
+		{"invalid size: 65537", args{"65537 GiB"}, true},
+		{"invalid size: not a string", args{65537}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := machinePoolRooDiskSizeValidator(tt.args.val); (err != nil) != tt.wantErr {
+				t.Errorf("machinePoolRooDiskSizeValidator() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}

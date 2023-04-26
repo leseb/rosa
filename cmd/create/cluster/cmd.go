@@ -30,6 +30,7 @@ import (
 	v1 "github.com/openshift-online/ocm-sdk-go/clustersmgmt/v1"
 	mpHelpers "github.com/openshift/rosa/pkg/helper/machinepools"
 	"github.com/spf13/cobra"
+	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/openshift/rosa/cmd/create/oidcprovider"
 	"github.com/openshift/rosa/cmd/create/operatorroles"
@@ -46,7 +47,6 @@ import (
 	"github.com/openshift/rosa/pkg/output"
 	"github.com/openshift/rosa/pkg/properties"
 	"github.com/openshift/rosa/pkg/rosa"
-	_ "k8s.io/apimachinery/pkg/api/resource"
 )
 
 // nolint
@@ -154,6 +154,9 @@ var args struct {
 	// Hypershift options:
 	hostedClusterEnabled bool
 	billingAccount       string
+
+	// Storage
+	machinePoolRootDiskSize string
 }
 
 var Cmd = &cobra.Command{
@@ -583,6 +586,12 @@ func init() {
 		false,
 		"Enable the use of hosted control planes (HyperShift)",
 	)
+
+	flags.StringVar(&args.machinePoolRootDiskSize,
+		"mp-root-disk-size",
+		"",
+		"Machine pool root disk size with a suffix like GiB or TiB, e.g. 200GiB")
+
 	flags.MarkHidden("hosted-cp")
 
 	flags.StringVar(
@@ -1266,7 +1275,7 @@ func run(cmd *cobra.Command, _ []string) {
 		for _, operator := range credRequests {
 			//If the cluster version is less than the supported operator version
 			if operator.MinVersion() != "" {
-				isSupported, err := ocm.CheckSupportedVersion(ocm.GetVersionMinor(version), operator.MinVersion())
+				isSupported, err := ocm.IsGreaterThanOrEqual(ocm.GetVersionMinor(version), operator.MinVersion())
 				if err != nil {
 					r.Reporter.Errorf("Error validating operator role '%s' version %s", operator.Name(), err)
 					os.Exit(1)
@@ -1735,7 +1744,12 @@ func run(cmd *cobra.Command, _ []string) {
 		os.Exit(1)
 	}
 
-	dMachinecidr, dPodcidr, dServicecidr, dhostPrefix, defaultComputeMachineType := r.OCMClient.
+	dMachinecidr,
+		dPodcidr,
+		dServicecidr,
+		dhostPrefix,
+		defaultMachinePoolRootDiskSize,
+		defaultComputeMachineType := r.OCMClient.
 		GetDefaultClusterFlavors(args.flavour)
 	if dMachinecidr == nil || dPodcidr == nil || dServicecidr == nil {
 		r.Reporter.Errorf("Error retrieving default cluster flavors")
@@ -2002,6 +2016,83 @@ func run(cmd *cobra.Command, _ []string) {
 		os.Exit(1)
 	}
 
+	// If OCP version >= 4.10 only
+	var machinePoolRootDisk *ocm.Volume
+
+	// Setting the machine pool root disk size is only supported on gp3 volumes
+	gp3SupportedVersion := "4.10.0"
+
+	// As of 4.10, GP3 is the default whenever possible, so this is sufficient to implement the
+	// disk size on GP3 only
+	// The only exception is when the availability zone is either local or wavelength, however this
+	// situation does not exist since LocalZone is only available as of 4.12
+	// OCM already has the fallback code to use gp2 if gp3 is not supported on a LocalZone
+	isGP3Supported, err := ocm.IsGreaterThanOrEqual(version, gp3SupportedVersion)
+	if err != nil {
+		r.Reporter.Errorf("Failed to check if the OCP version is greater than or equal to %s: %v", gp3SupportedVersion, err)
+		os.Exit(1)
+	}
+
+	// If the user sets the machine pool root disk size and the cluster is not 4.10 or greater, we
+	// print a warning and ignore the value
+	if !isGP3Supported && args.machinePoolRootDiskSize != "" {
+		r.Reporter.Warnf("Setting the machine pool root disk size is only supported on OpenShift " +
+			"4.10 or greater. Ignoring the value.")
+	}
+
+	// Allow non -GP3 volume if the AZ is local or wavelength
+	if isGP3Supported &&
+		(args.machinePoolRootDiskSize != "" || interactive.Enabled()) {
+		var machinePoolRootDiskSizeStr string
+		if args.machinePoolRootDiskSize == "" {
+			// We don't need to parse the default since it's returned from the OCM API and AWS
+			// always defaults to GiB
+			machinePoolRootDiskSizeStr = gigybyteStringer(defaultMachinePoolRootDiskSize)
+		} else {
+			machinePoolRootDiskSizeStr = args.machinePoolRootDiskSize
+		}
+		if interactive.Enabled() {
+			// In order to avoid confusion, we want to display to the user what was passed as an
+			// argument
+			// Even if it was not valid, we want to display it to the user, then the CLI will show an
+			// error and the value can be corrected
+			// Also, if nothing is given, we want to display the default value fetched from the OCM API
+			machinePoolRootDiskSizeStr, err = interactive.GetString(interactive.Input{
+				Question: "Machine pool root disk size (GiB or TiB)",
+				Help:     cmd.Flags().Lookup("mp-root-disk-size").Usage,
+				Default:  machinePoolRootDiskSizeStr,
+				Validators: []interactive.Validator{
+					machinePoolRooDiskSizeValidator,
+				},
+			})
+			if err != nil {
+				r.Reporter.Errorf("Expected a valid machine pool root disk size value: %v", err)
+				os.Exit(1)
+			}
+		} else {
+			err = machinePoolRooDiskSizeValidator(machinePoolRootDiskSizeStr)
+			if err != nil {
+				r.Reporter.Errorf("%v", err)
+				os.Exit(1)
+			}
+		}
+
+		// Parse the value given by either CLI or interactive mode and return it in GigiBytes
+		machinePoolRootDiskSize, err := parseDiskSizeToGigibyte(machinePoolRootDiskSizeStr)
+		if err != nil {
+			r.Reporter.Errorf("Expected a valid machine pool root disk size value: %v", err)
+			os.Exit(1)
+		}
+
+		// If the size given by the user is different than the default, we just let the OCM server
+		// handle the default root disk size
+		if machinePoolRootDiskSize != defaultMachinePoolRootDiskSize {
+			machinePoolRootDisk = &ocm.Volume{
+				Size: machinePoolRootDiskSize,
+			}
+		}
+	}
+
 	fips := args.fips || fedramp.Enabled()
 	if interactive.Enabled() && !fedramp.Enabled() {
 		fips, err = interactive.GetBool(interactive.Input{
@@ -2253,7 +2344,8 @@ func run(cmd *cobra.Command, _ []string) {
 		Hypershift: ocm.Hypershift{
 			Enabled: isHostedCP,
 		},
-		BillingAccount: billingAccount,
+		BillingAccount:      billingAccount,
+		MachinePoolRootDisk: machinePoolRootDisk,
 	}
 
 	if oidcConfig != nil {
@@ -2303,6 +2395,10 @@ func run(cmd *cobra.Command, _ []string) {
 		if interactive.Enabled() {
 			command := buildCommand(clusterConfig, operatorRolesPrefix, expectedOperatorRolePath,
 				isAvailabilityZonesSet || selectAvailabilityZones, labels)
+			if err != nil {
+				r.Reporter.Errorf("Failed to build command: %s", err)
+				os.Exit(1)
+			}
 			r.Reporter.Infof("To create this cluster again in the future, you can run:\n   %s", command)
 		}
 		r.Reporter.Infof("To view a list of clusters and their status, run 'rosa list clusters'")
@@ -2512,8 +2608,10 @@ func maxReplicaValidator(multiAZ bool, minReplicas int, isHostedCP bool,
 }
 
 const (
-	HostPrefixMin = 23
-	HostPrefixMax = 26
+	HostPrefixMin                = 23
+	HostPrefixMax                = 26
+	MachinePoolRootVolumeSizeMin = 128   // 128 GiB - similar to ARO
+	MachinePoolRootVolumeSizeMax = 16384 // 16 TiB - EBS gp3 limit
 )
 
 func hostPrefixValidator(val interface{}) error {
@@ -2801,6 +2899,13 @@ func buildCommand(spec ocm.Spec, operatorRolesPrefix string,
 		command += fmt.Sprintf(" --etcd-encryption-kms-arn %s", spec.EtcdEncryptionKMSArn)
 	}
 
+	if spec.MachinePoolRootDisk != nil {
+		machinePoolRootDiskSize := spec.MachinePoolRootDisk.Size
+		if machinePoolRootDiskSize != 0 {
+			command += fmt.Sprintf(" --mp-root-disk-size %dGiB", machinePoolRootDiskSize)
+		}
+	}
+
 	return command
 }
 
@@ -2837,4 +2942,94 @@ func calculateReplicas(
 	}
 
 	return newMinReplicas, newMaxReplicas
+}
+
+func machinePoolRooDiskSizeValidator(val interface{}) error {
+	// We expect GigiByte as the unit for the root volume size
+
+	// Validate the worker root volume size is an integer
+	machinePoolRootDiskSize, ok := val.(string)
+	if !ok {
+		return fmt.Errorf("machine pool root disk size must be an string, got %T", machinePoolRootDiskSize)
+	}
+
+	// parse it to get the value in
+	parsedMachinePoolRootVolumeSize, err := parseDiskSizeToGigibyte(machinePoolRootDiskSize)
+	if err != nil {
+		return fmt.Errorf("failed to parse machine pool root disk size: %v", err)
+	}
+
+	if parsedMachinePoolRootVolumeSize < MachinePoolRootVolumeSizeMin ||
+		parsedMachinePoolRootVolumeSize > MachinePoolRootVolumeSizeMax {
+		return fmt.Errorf(
+			"invalid machine pool root disk size %s, parsed as %d GiB: size must be between %d GiB and %d GiB",
+			machinePoolRootDiskSize, parsedMachinePoolRootVolumeSize, MachinePoolRootVolumeSizeMin, MachinePoolRootVolumeSizeMax)
+	}
+
+	return nil
+}
+
+func parseDiskSizeToGigibyte(size string) (int, error) {
+	// Empty string is valid, a default will be set later
+	if size == "" {
+		return 0, nil
+	}
+
+	suffixErrorString := "accepted units are Giga or Tera in the form of g, G, GB, GiB, Gi, t, T, TB, TiB, Ti"
+
+	// Remove spaces if the value is '100 GB'
+	size = strings.ReplaceAll(size, " ", "")
+
+	// Do a bit of cleaning to avoid errors from the resources quantity parser
+	unitToConvert := map[string]string{
+		"GB":  "G",
+		"gb":  "G",
+		"Gb":  "G",
+		"g":   "G",
+		"gib": "Gi",
+		"GIB": "Gi",
+		"GiB": "Gi",
+		"Gib": "Gi",
+		"TB":  "T",
+		"tb":  "T",
+		"Tb":  "T",
+		"t":   "T",
+		"tib": "Ti",
+		"TIB": "Ti",
+		"TiB": "Ti",
+		"Tib": "Ti",
+	}
+	for badUnit, rightUnit := range unitToConvert {
+		size = strings.Replace(size, badUnit, rightUnit, 1)
+	}
+
+	qty, err := resource.ParseQuantity(size)
+	if err != nil {
+		if err == resource.ErrFormatWrong {
+			return 0, fmt.Errorf("invalid disk size format: %s. %s", size, suffixErrorString)
+		}
+		return 0, fmt.Errorf("invalid disk size: %w", err)
+	}
+
+	// If the value is 0, we don't need to do anything a default will be set later
+	if qty.IsZero() {
+		return 0, nil
+	}
+
+	// Check the suffix is correct
+	diskSize := qty.String()
+	if strings.HasSuffix(diskSize, "M") ||
+		strings.HasSuffix(diskSize, "Mi") ||
+		strings.HasSuffix(diskSize, "K") ||
+		strings.HasSuffix(diskSize, "Ki") {
+		return 0, fmt.Errorf("invalid disk size format: %s. %s", diskSize, suffixErrorString)
+	}
+
+	// Return gibibytes since the AWS expects that format
+	// qty.Value() returns the value in bytes
+	return int(qty.Value() / 1024 / 1024 / 1024), nil
+}
+
+func gigybyteStringer(size int) string {
+	return fmt.Sprintf("%d GiB", size)
 }

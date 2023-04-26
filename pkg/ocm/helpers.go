@@ -169,19 +169,19 @@ func handleErr(res *ocmerrors.Error, err error) error {
 }
 
 func (c *Client) GetDefaultClusterFlavors(flavour string) (dMachinecidr *net.IPNet, dPodcidr *net.IPNet,
-	dServicecidr *net.IPNet, dhostPrefix int, computeInstanceType string) {
+	dServicecidr *net.IPNet, dhostPrefix, defaultMachineRootVolumeSize int, computeInstanceType string) {
 	flavourGetResponse, err := c.ocm.ClustersMgmt().V1().Flavours().Flavour(flavour).Get().Send()
 	if err != nil {
 		flavourGetResponse, _ = c.ocm.ClustersMgmt().V1().Flavours().Flavour("osd-4").Get().Send()
 	}
 	aws, ok := flavourGetResponse.Body().GetAWS()
 	if !ok {
-		return nil, nil, nil, 0, ""
+		return nil, nil, nil, 0, 0, ""
 	}
 	computeInstanceType = aws.ComputeInstanceType()
 	network, ok := flavourGetResponse.Body().GetNetwork()
 	if !ok {
-		return nil, nil, nil, 0, computeInstanceType
+		return nil, nil, nil, 0, 0, computeInstanceType
 	}
 	_, dMachinecidr, err = net.ParseCIDR(network.MachineCIDR())
 	if err != nil {
@@ -196,7 +196,11 @@ func (c *Client) GetDefaultClusterFlavors(flavour string) (dMachinecidr *net.IPN
 		dServicecidr = nil
 	}
 	dhostPrefix, _ = network.GetHostPrefix()
-	return dMachinecidr, dPodcidr, dServicecidr, dhostPrefix, computeInstanceType
+
+	// default machine root volume size
+	defaultMachineRootVolumeSize = aws.WorkerVolume().Size()
+
+	return dMachinecidr, dPodcidr, dServicecidr, dhostPrefix, defaultMachineRootVolumeSize, computeInstanceType
 }
 
 func (c *Client) LogEvent(key string, body map[string]string) {
@@ -494,16 +498,16 @@ func GetVersionMinor(ver string) string {
 	return fmt.Sprintf("%d.%d", segments[0], segments[1])
 }
 
-func CheckSupportedVersion(clusterVersion string, operatorVersion string) (bool, error) {
-	v1, err := semver.NewVersion(clusterVersion)
+func IsGreaterThanOrEqual(version1, version2 string) (bool, error) {
+	versionPrefix := "openshift-v"
+	v1, err := semver.NewVersion(strings.TrimPrefix(version1, versionPrefix))
 	if err != nil {
 		return false, err
 	}
-	v2, err := semver.NewVersion(operatorVersion)
+	v2, err := semver.NewVersion(strings.TrimPrefix(version2, versionPrefix))
 	if err != nil {
 		return false, err
 	}
-	//Cluster version is greater than or equal to operator version
 	return v1.GreaterThanOrEqual(v2), nil
 }
 

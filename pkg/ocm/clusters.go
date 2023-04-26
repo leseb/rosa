@@ -112,6 +112,14 @@ type Spec struct {
 	// HyperShift options:
 	Hypershift     Hypershift
 	BillingAccount string
+
+	// Machine pool's storage
+	MachinePoolRootDisk *Volume
+}
+
+// Volume represents a volume property for a disk
+type Volume struct {
+	Size int
 }
 
 type OperatorIAMRole struct {
@@ -680,11 +688,21 @@ func (c *Client) createClusterSpec(config Spec, awsClient aws.Client) (*cmv1.Clu
 	}
 
 	if config.Flavour != "" {
-		clusterBuilder = clusterBuilder.Flavour(
-			cmv1.NewFlavour().
-				ID(config.Flavour),
-		)
+		var flavourBuilder *cmv1.FlavourBuilder
+		// If a machine pool root disk is specified, use it to override the default
+		// this only affect the worker nodes
+		if config.MachinePoolRootDisk != nil {
+			flavourBuilder = cmv1.NewFlavour().
+				ID(config.Flavour).
+				AWS(cmv1.NewAWSFlavour().
+					WorkerVolume(cmv1.NewAWSVolume().Size(config.MachinePoolRootDisk.Size)),
+				)
+		} else {
+			flavourBuilder = cmv1.NewFlavour().
+				ID(config.Flavour)
+		}
 		reporter.Debugf("Using cluster flavour '%s'", config.Flavour)
+		clusterBuilder = clusterBuilder.Flavour(flavourBuilder)
 	}
 
 	if config.Version != "" {

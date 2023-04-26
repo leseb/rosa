@@ -413,7 +413,7 @@ func run(cmd *cobra.Command, argv []string) {
 	for _, operator := range credRequests {
 		//If the cluster version is less than the supported operator version
 		if operator.MinVersion() != "" {
-			isSupported, err := ocm.CheckSupportedVersion(ocm.GetVersionMinor(version), operator.MinVersion())
+			isSupported, err := ocm.IsGreaterThanOrEqual(ocm.GetVersionMinor(version), operator.MinVersion())
 			if err != nil {
 				r.Reporter.Errorf("Error validating operator role %q version %s", operator.Name(), err)
 				os.Exit(1)

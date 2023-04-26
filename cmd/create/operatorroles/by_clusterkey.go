@@ -154,7 +154,7 @@ func createRoles(r *rosa.Runtime,
 	for credrequest, operator := range credRequests {
 		ver := cluster.Version()
 		if ver != nil && operator.MinVersion() != "" {
-			isSupported, err := ocm.CheckSupportedVersion(ocm.GetVersionMinor(ver.ID()), operator.MinVersion())
+			isSupported, err := ocm.IsGreaterThanOrEqual(ocm.GetVersionMinor(ver.ID()), operator.MinVersion())
 			if err != nil {
 				r.Reporter.Errorf("Error validating operator role '%s' version %s", operator.Name(), err)
 				os.Exit(1)
@@ -265,7 +265,7 @@ func buildCommands(r *rosa.Runtime, env string,
 	for credrequest, operator := range credRequests {
 		ver := cluster.Version()
 		if ver != nil && operator.MinVersion() != "" {
-			isSupported, err := ocm.CheckSupportedVersion(ocm.GetVersionMinor(ver.ID()), operator.MinVersion())
+			isSupported, err := ocm.IsGreaterThanOrEqual(ocm.GetVersionMinor(ver.ID()), operator.MinVersion())
 			if err != nil {
 				r.Reporter.Errorf("Error validating operator role '%s' version %s", operator.Name(), err)
 				os.Exit(1)
